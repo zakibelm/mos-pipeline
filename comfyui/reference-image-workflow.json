@@ -1,0 +1,93 @@
+{
+  "4": {
+    "inputs": {
+      "ckpt_name": "sdxl_base_1.0.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": { "title": "Load SDXL Base" }
+  },
+  "5": {
+    "inputs": {
+      "width": 896,
+      "height": 1152,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": { "title": "Latent 9:16 (896x1152)" }
+  },
+  "6": {
+    "inputs": {
+      "text": "MOS_POSITIVE_PROMPT",
+      "clip": ["4", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Positive Prompt",
+      "mos_inject": true,
+      "mos_field": "prompt_comfyui",
+      "mos_node_id": "6"
+    }
+  },
+  "7": {
+    "inputs": {
+      "text": "MOS_NEGATIVE_PROMPT",
+      "clip": ["4", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Negative Prompt",
+      "mos_inject": true,
+      "mos_field": "negative_prompt",
+      "mos_node_id": "7"
+    }
+  },
+  "3": {
+    "inputs": {
+      "seed": 42,
+      "steps": 25,
+      "cfg": 7.0,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 1.0,
+      "model":    ["4", 0],
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "latent_image": ["5", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": { "title": "KSampler — DPM++ 2M Karras 25 steps" }
+  },
+  "8": {
+    "inputs": {
+      "samples": ["3", 0],
+      "vae": ["4", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": { "title": "VAE Decode" }
+  },
+  "9": {
+    "inputs": {
+      "filename_prefix": "mos_reference",
+      "images": ["8", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": { "title": "Save Reference Image" }
+  },
+  "__mos_meta": {
+    "version": "1.0",
+    "description": "Workflow SDXL base — format 9:16 (896x1152) pour Reels/TikTok",
+    "positive_node_id": "6",
+    "negative_node_id": "7",
+    "sampler_node_id": "3",
+    "output_node_id": "9",
+    "output_prefix": "mos_reference",
+    "model_required": "sdxl_base_1.0.safetensors",
+    "setup_notes": [
+      "Télécharger sdxl_base_1.0.safetensors dans ComfyUI/models/checkpoints/",
+      "Le champ 'seed' du node 3 est remplacé dynamiquement par n8n (basé sur queue_id)",
+      "Les nodes 6 et 7 reçoivent les prompts injectés par le workflow Submit",
+      "Les images de sortie sont dans ComfyUI/output/ avec préfixe mos_reference",
+      "Adapter ckpt_name selon le modèle installé sur votre VPS"
+    ]
+  }
+}
