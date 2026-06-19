@@ -1,0 +1,336 @@
+{
+  "name": "MOS-v4.1-ComfyUI-Poller",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 2 }]
+        }
+      },
+      "id": "p001aa11-bb22-cc33-dd44-ee5566778899",
+      "name": "Poll Every 2 Min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [180, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/comfyui_jobs_for_poller?select=*&order=started_at.asc&limit=20",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        }
+      },
+      "id": "p002bb22-cc33-dd44-ee55-ff6677889900",
+      "name": "Get Processing Jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "has-jobs",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ]
+        }
+      },
+      "id": "p003cc33-dd44-ee55-ff66-778899001122",
+      "name": "Has Jobs?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "=",
+        "options": {}
+      },
+      "id": "p004dd44-ee55-ff66-7788-990011223344",
+      "name": "Split Into Jobs",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [900, 180]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.COMFYUI_URL }}/history/{{ $json.comfyui_prompt_id }}",
+        "sendHeaders": false,
+        "options": {
+          "timeout": 10000,
+          "response": { "response": { "neverError": true } }
+        }
+      },
+      "id": "p005ee55-ff66-7788-9900-112233445566",
+      "name": "Check ComfyUI History",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 180]
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Analyse le résultat de /history/{prompt_id}\nconst historyResponse = $input.first().json;\nconst job = $node['Split Into Jobs'].json;\n\nconst promptId = job.comfyui_prompt_id;\nconst entry = historyResponse[promptId];\n\nlet status = 'still_processing';\nlet outputFilename = null;\nlet outputSubfolder = '';\nlet outputType = 'output';\nlet errorMsg = null;\n\nif (!entry) {\n  // Pas encore dans l'historique — toujours en queue\n  status = 'still_processing';\n} else if (entry.status?.completed === true && entry.outputs) {\n  // Terminé avec succès\n  const outputNodes = Object.values(entry.outputs);\n  for (const nodeOut of outputNodes) {\n    if (nodeOut.images && nodeOut.images.length > 0) {\n      const img = nodeOut.images[0];\n      outputFilename = img.filename;\n      outputSubfolder = img.subfolder || '';\n      outputType = img.type || 'output';\n      status = 'completed';\n      break;\n    }\n  }\n  if (status !== 'completed') {\n    status = 'completed_no_image';\n    errorMsg = 'ComfyUI returned completed but no image found';\n  }\n} else if (entry.status?.status_str === 'error') {\n  status = 'errored';\n  const msgs = entry.status?.messages || [];\n  errorMsg = msgs.find(m => m[0] === 'execution_error')?.[1]?.exception_message || 'ComfyUI execution error';\n}\n\nconst isStuck = job.is_stuck;\n\nreturn [{\n  json: {\n    // Données du job\n    queue_id:       job.queue_id,\n    video_id:       job.video_id,\n    client_id:      job.client_id,\n    notion_page_id: job.notion_page_id,\n    retry_count:    job.retry_count,\n    max_retries:    job.max_retries,\n    // Résultat\n    status,\n    is_stuck: isStuck,\n    output_filename:  outputFilename,\n    output_subfolder: outputSubfolder,\n    output_type:      outputType,\n    error_message: errorMsg\n  }\n}];"
+      },
+      "id": "p006ff66-7788-9900-1122-334455667788",
+      "name": "Parse History",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1380, 180]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "output": "={{ $json.status === 'completed' ? 0 : ($json.status === 'errored' || $json.is_stuck ? 1 : 2) }}",
+        "cases": [
+          { "value": 0, "output": 0 },
+          { "value": 1, "output": 1 },
+          { "value": 2, "output": 2 }
+        ],
+        "fallbackOutput": 2
+      },
+      "id": "p007aa77-bb88-cc99-dd00-ee1122334455",
+      "name": "Route Result",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [1620, 180]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.COMFYUI_URL }}/view?filename={{ encodeURIComponent($json.output_filename) }}&subfolder={{ encodeURIComponent($json.output_subfolder) }}&type={{ $json.output_type }}",
+        "sendHeaders": false,
+        "options": {
+          "response": {
+            "response": { "responseFormat": "file", "outputPropertyName": "image_data" }
+          }
+        }
+      },
+      "id": "p008bb88-cc99-dd00-ee11-2233445566778",
+      "name": "Download Image",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1860, 60]
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Prépare les métadonnées pour l'upload Supabase Storage\nconst parsed = $node['Parse History'].json;\nconst ts = Date.now();\nconst ext = parsed.output_filename?.split('.').pop() || 'png';\nconst storagePath = `${parsed.client_id}/${parsed.video_id}/${ts}_reference.${ext}`;\n\nreturn [{\n  json: {\n    ...parsed,\n    storage_path: storagePath,\n    content_type: ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png',\n    public_url: `${process.env.SUPABASE_URL}/storage/v1/object/public/mos-images/${storagePath}`\n  },\n  binary: $input.first().binary\n}];"
+      },
+      "id": "p009cc99-dd00-ee11-2233-4455667788990",
+      "name": "Prepare Upload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2100, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/storage/v1/object/mos-images/{{ $json.storage_path }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "={{ $json.content_type }}" },
+            { "name": "x-upsert",      "value": "true" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "binaryData",
+        "inputDataFieldName": "image_data"
+      },
+      "id": "p010dd00-ee11-2233-4455-667788990011",
+      "name": "Upload to Supabase Storage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2340, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/mark_comfyui_completed",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_queue_id: $node['Prepare Upload'].json.queue_id, p_image_url: $node['Prepare Upload'].json.public_url, p_output_payload: { storage_path: $node['Prepare Upload'].json.storage_path, comfyui_filename: $node['Parse History'].json.output_filename } }) }}"
+      },
+      "id": "p011ee11-2233-4455-6677-889900112233",
+      "name": "Mark Completed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2580, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/release_processing_lock",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_client_id: $node['Prepare Upload'].json.client_id, p_lock_type: 'comfyui_image' }) }}"
+      },
+      "id": "p012ff22-3344-5566-7788-990011223344",
+      "name": "Release Lock",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2820, 60]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/pages/{{ $node['Prepare Upload'].json.notion_page_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization",  "value": "=Bearer {{ $env.NOTION_API_KEY }}" },
+            { "name": "Notion-Version", "value": "2022-06-28" },
+            { "name": "Content-Type",   "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: { 'Statut': { select: { name: 'Image générée' } }, 'Image référence': { url: $node['Prepare Upload'].json.public_url } } }) }}"
+      },
+      "id": "p013aa33-4455-6677-8899-001122334455",
+      "name": "Update Notion Image",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3060, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/mark_comfyui_failed",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_queue_id: $json.queue_id, p_error: $json.error_message || ($json.is_stuck ? 'Job stuck > 15 minutes — no response from ComfyUI' : 'ComfyUI execution error') }) }}"
+      },
+      "id": "p014bb44-5566-7788-9900-112233445566",
+      "name": "Mark Failed or Stuck",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1860, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/release_processing_lock",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_client_id: $json.client_id, p_lock_type: 'comfyui_image' }) }}"
+      },
+      "id": "p015cc55-6677-8899-0011-223344556677",
+      "name": "Release Lock on Failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2100, 300]
+    }
+  ],
+  "connections": {
+    "Poll Every 2 Min": {
+      "main": [[{ "node": "Get Processing Jobs", "type": "main", "index": 0 }]]
+    },
+    "Get Processing Jobs": {
+      "main": [[{ "node": "Has Jobs?", "type": "main", "index": 0 }]]
+    },
+    "Has Jobs?": {
+      "main": [
+        [{ "node": "Split Into Jobs", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Split Into Jobs": {
+      "main": [[{ "node": "Check ComfyUI History", "type": "main", "index": 0 }]]
+    },
+    "Check ComfyUI History": {
+      "main": [[{ "node": "Parse History", "type": "main", "index": 0 }]]
+    },
+    "Parse History": {
+      "main": [[{ "node": "Route Result", "type": "main", "index": 0 }]]
+    },
+    "Route Result": {
+      "main": [
+        [{ "node": "Download Image",      "type": "main", "index": 0 }],
+        [{ "node": "Mark Failed or Stuck","type": "main", "index": 0 }],
+        [{ "node": "Split Into Jobs",     "type": "main", "index": 0 }]
+      ]
+    },
+    "Download Image": {
+      "main": [[{ "node": "Prepare Upload", "type": "main", "index": 0 }]]
+    },
+    "Prepare Upload": {
+      "main": [[{ "node": "Upload to Supabase Storage", "type": "main", "index": 0 }]]
+    },
+    "Upload to Supabase Storage": {
+      "main": [[{ "node": "Mark Completed", "type": "main", "index": 0 }]]
+    },
+    "Mark Completed": {
+      "main": [[{ "node": "Release Lock", "type": "main", "index": 0 }]]
+    },
+    "Release Lock": {
+      "main": [[{ "node": "Update Notion Image", "type": "main", "index": 0 }]]
+    },
+    "Update Notion Image": {
+      "main": [[{ "node": "Split Into Jobs", "type": "main", "index": 0 }]]
+    },
+    "Mark Failed or Stuck": {
+      "main": [[{ "node": "Release Lock on Failure", "type": "main", "index": 0 }]]
+    },
+    "Release Lock on Failure": {
+      "main": [[{ "node": "Split Into Jobs", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "instanceId": "mos-pipeline" },
+  "tags": [{ "name": "MOS-v4.1" }],
+  "__mos_config": {
+    "env_required": [
+      "SUPABASE_URL", "SUPABASE_SERVICE_KEY",
+      "COMFYUI_URL", "NOTION_API_KEY"
+    ],
+    "storage_bucket": "mos-images (public, créer via Supabase Dashboard → Storage)",
+    "polling_interval": "2 minutes — ajuster selon la durée de génération ComfyUI",
+    "note": "Route Result output 2 = still_processing → SplitInBatches continue loop vers job suivant"
+  }
+}
