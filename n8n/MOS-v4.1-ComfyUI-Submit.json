@@ -1,0 +1,267 @@
+{
+  "name": "MOS-v4.1-ComfyUI-Submit",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "mos-comfyui",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "c001aa11-bb22-cc33-dd44-ee5566778899",
+      "name": "ComfyUI Submit Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [180, 300],
+      "webhookId": "mos-comfyui-submit"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/video_production_notion?id=eq.{{ $json.video_id }}&select=id,client_id,notion_page_id,prompt_comfyui,negative_prompt,statut",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        }
+      },
+      "id": "c002bb22-cc33-dd44-ee55-ff6677889900",
+      "name": "Get Video Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/acquire_processing_lock",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_client_id: $json[0].client_id, p_lock_type: 'comfyui_image', p_locked_by: $execution.id, p_ttl_minutes: 30 }) }}"
+      },
+      "id": "c003cc33-dd44-ee55-ff66-778899001122",
+      "name": "Acquire ComfyUI Lock",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false },
+          "conditions": [
+            {
+              "id": "lock-check",
+              "leftValue": "={{ $json }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equal" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "c004dd44-ee55-ff66-7788-990011223344",
+      "name": "Lock Acquired?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/queue_comfyui_image",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_video_id: $node['Get Video Details'].json[0].id, p_payload: { triggered_by: 'notion_sync', execution_id: $execution.id } }) }}"
+      },
+      "id": "c005ee55-ff66-7788-9900-112233445566",
+      "name": "Create Queue Entry",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 180]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/comfyui_workflows?is_default=eq.true&is_active=eq.true&select=*&limit=1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        }
+      },
+      "id": "c006ff66-7788-9900-1122-334455667788",
+      "name": "Get Workflow Template",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1380, 180]
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Injection des prompts dans le workflow ComfyUI\nconst video     = $node['Get Video Details'].json[0];\nconst queue_id  = $node['Create Queue Entry'].json;\nconst template  = $node['Get Workflow Template'].json[0];\n\nif (!template) throw new Error('No active ComfyUI workflow template found');\n\nconst workflow = JSON.parse(JSON.stringify(template.workflow_json));\n\n// Injection positive prompt\nconst posNode = workflow[template.positive_node_id];\nif (!posNode) throw new Error(`Positive node '${template.positive_node_id}' not found in workflow`);\nposNode.inputs.text = video.prompt_comfyui || 'professional product photo, high quality, 4k';\n\n// Injection negative prompt\nconst negNode = workflow[template.negative_node_id];\nif (!negNode) throw new Error(`Negative node '${template.negative_node_id}' not found in workflow`);\nnegNode.inputs.text = video.negative_prompt || 'blurry, low quality, watermark, text overlay';\n\n// Seed aléatoire reproductible basé sur queue_id\nconst seed = parseInt(queue_id.replace(/-/g, '').substring(0, 8), 16) % 2147483647;\nconst samplerNode = Object.values(workflow).find(n => n.class_type === 'KSampler');\nif (samplerNode) samplerNode.inputs.seed = seed;\n\nreturn [{\n  json: {\n    queue_id,\n    video_id:   video.id,\n    client_id:  video.client_id,\n    notion_page_id: video.notion_page_id,\n    workflow_json: workflow,\n    positive_node_id: template.positive_node_id\n  }\n}];"
+      },
+      "id": "c007aa77-bb88-cc99-dd00-ee1122334455",
+      "name": "Inject Prompts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1620, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.COMFYUI_URL }}/prompt",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ client_id: $json.queue_id, prompt: $json.workflow_json }) }}"
+      },
+      "id": "c008bb88-cc99-dd00-ee11-22334455667788",
+      "name": "POST to ComfyUI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1860, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/mark_comfyui_started",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_queue_id: $node['Inject Prompts'].json.queue_id, p_comfyui_prompt_id: $json.prompt_id }) }}"
+      },
+      "id": "c009cc99-dd00-ee11-2233-4455667788990",
+      "name": "Save ComfyUI Prompt ID",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2100, 180]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"accepted\", \"queue_id\": \"{{ $node['Inject Prompts'].json.queue_id }}\", \"comfyui_prompt_id\": \"{{ $node['POST to ComfyUI'].json.prompt_id }}\" }",
+        "options": { "responseCode": 202 }
+      },
+      "id": "c010dd00-ee11-2233-4455-667788990011",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2340, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/image_generation_queue?id=eq.{{ $node['Create Queue Entry'].json }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Prefer",        "value": "return=minimal" }
+          ]
+        },
+        "method": "PATCH",
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={ \"next_retry_at\": \"{{ new Date(Date.now() + 5 * 60000).toISOString() }}\", \"last_error\": \"Lock not available — requeued\" }"
+      },
+      "id": "c011ee11-2233-4455-6677-889900112233",
+      "name": "Requeue (Lock Busy)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 420]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"requeued\", \"reason\": \"ComfyUI lock busy — retry in 5 minutes\" }",
+        "options": { "responseCode": 202 }
+      },
+      "id": "c012ff22-3344-5566-7788-990011223344",
+      "name": "Respond 202 Requeued",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1380, 420]
+    }
+  ],
+  "connections": {
+    "ComfyUI Submit Webhook": {
+      "main": [[{ "node": "Get Video Details", "type": "main", "index": 0 }]]
+    },
+    "Get Video Details": {
+      "main": [[{ "node": "Acquire ComfyUI Lock", "type": "main", "index": 0 }]]
+    },
+    "Acquire ComfyUI Lock": {
+      "main": [[{ "node": "Lock Acquired?", "type": "main", "index": 0 }]]
+    },
+    "Lock Acquired?": {
+      "main": [
+        [{ "node": "Create Queue Entry",  "type": "main", "index": 0 }],
+        [{ "node": "Requeue (Lock Busy)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Queue Entry": {
+      "main": [[{ "node": "Get Workflow Template", "type": "main", "index": 0 }]]
+    },
+    "Get Workflow Template": {
+      "main": [[{ "node": "Inject Prompts", "type": "main", "index": 0 }]]
+    },
+    "Inject Prompts": {
+      "main": [[{ "node": "POST to ComfyUI", "type": "main", "index": 0 }]]
+    },
+    "POST to ComfyUI": {
+      "main": [[{ "node": "Save ComfyUI Prompt ID", "type": "main", "index": 0 }]]
+    },
+    "Save ComfyUI Prompt ID": {
+      "main": [[{ "node": "Respond 202 Accepted", "type": "main", "index": 0 }]]
+    },
+    "Requeue (Lock Busy)": {
+      "main": [[{ "node": "Respond 202 Requeued", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "instanceId": "mos-pipeline" },
+  "tags": [{ "name": "MOS-v4.1" }],
+  "__mos_config": {
+    "env_required": [
+      "SUPABASE_URL", "SUPABASE_SERVICE_KEY",
+      "COMFYUI_URL"
+    ],
+    "comfyui_url_example": "http://your-vps-ip:8188",
+    "note": "Le Poller (MOS-v4.1-ComfyUI-Poller) gère la complétion et l'upload image"
+  }
+}
