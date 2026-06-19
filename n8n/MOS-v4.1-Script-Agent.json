@@ -1,0 +1,273 @@
+{
+  "name": "MOS-v4.1-Script-Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "mos-script-agent",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "10111213-1415-1617-1819-1a1b1c1d1e1f",
+      "name": "Script Agent Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [180, 300],
+      "webhookId": "mos-script-agent"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/video_production_notion?id=eq.{{ $json.video_id }}&select=*",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        }
+      },
+      "id": "20212223-2425-2627-2829-2a2b2c2d2e2f",
+      "name": "Get Video Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/update_video_statut",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={ \"p_video_id\": \"{{ $json[0].id }}\", \"p_statut\": \"script_generating\" }"
+      },
+      "id": "30313233-3435-3637-3839-3a3b3c3d3e3f",
+      "name": "Set Generating",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/retrieve_context",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={ \"p_client_id\": \"{{ $node['Get Video Details'].json[0].client_id }}\", \"p_limit\": 5 }"
+      },
+      "id": "40414243-4445-4647-4849-4a4b4c4d4e4f",
+      "name": "Get RAG Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/get_client_winning_patterns",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={ \"p_client_id\": \"{{ $node['Get Video Details'].json[0].client_id }}\" }"
+      },
+      "id": "50515253-5455-5657-5859-5a5b5c5d5e5f",
+      "name": "Get Winning Patterns",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 420]
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Construit le prompt final Script Agent\nconst video    = $node['Get Video Details'].json[0];\nconst ragCtx   = $node['Get RAG Context'].json || [];\nconst patterns = $node['Get Winning Patterns'].json || [];\n\n// Formate le contexte RAG\nconst ragText = ragCtx.length > 0\n  ? ragCtx.map(c => `[${c.context_type.toUpperCase()}] ${c.title ? c.title + ':\\n' : ''}${c.content}`).join('\\n\\n')\n  : 'Aucun contexte client disponible.';\n\n// Formate les patterns gagnants\nconst patternsText = patterns.length > 0\n  ? patterns.map(p => `- Type: ${p.element_type} | Valeur: \"${p.element_value}\" | Engagement: ${p.avg_engagement_rate ? (p.avg_engagement_rate * 100).toFixed(1) + '%' : 'N/A'}`).join('\\n')\n  : 'Pas encore de patterns disponibles pour ce client.';\n\nconst userPrompt = `BRIEF CLIENT :\\n${video.brief || 'Non spécifié'}\\n\\nOBJECTIF : ${video.objective || 'Non spécifié'}\\nPLATEFORME : ${video.platform || 'Instagram Reels'}\\nFORMAT : ${video.format || 'Vidéo courte 15s'}\\nAUDIENCE : ${video.target_audience || 'Non spécifié'}\\nLANGUE : ${video.language || 'fr-CA'}\\n\\nCONTEXTE CLIENT (RAG) :\\n${ragText}\\n\\nPATTERNS GAGNANTS :\\n${patternsText}`;\n\nreturn [{\n  json: {\n    video_id:    video.id,\n    client_id:   video.client_id,\n    user_prompt: userPrompt,\n    video:       video\n  }\n}];"
+      },
+      "id": "60616263-6465-6667-6869-6a6b6c6d6e6f",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1140, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization",  "value": "=Bearer {{ $env.OPENROUTER_API_KEY }}" },
+            { "name": "Content-Type",   "value": "application/json" },
+            { "name": "HTTP-Referer",   "value": "={{ $env.N8N_BASE_URL }}" },
+            { "name": "X-Title",        "value": "MOS v4.1 Script Agent" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: $env.OPENROUTER_MODEL || 'anthropic/claude-sonnet-4-6',\n  messages: [\n    {\n      role: 'system',\n      content: $env.VIDEO_SCRIPT_SYSTEM_PROMPT\n    },\n    {\n      role: 'user',\n      content: $json.user_prompt\n    }\n  ],\n  temperature: 0.7,\n  max_tokens: 2000,\n  response_format: { type: 'json_object' }\n}) }}"
+      },
+      "id": "70717273-7475-7677-7879-7a7b7c7d7e7f",
+      "name": "Call OpenRouter",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1380, 300]
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Valide et parse la réponse OpenRouter\nconst response = $input.first().json;\nconst video_id  = $node['Build Prompt'].json.video_id;\nconst client_id = $node['Build Prompt'].json.client_id;\n\nconst usage = response.usage || {};\nconst rawContent = response.choices?.[0]?.message?.content;\n\nif (!rawContent) {\n  throw new Error('OpenRouter returned empty content');\n}\n\nlet parsed;\ntry {\n  parsed = JSON.parse(rawContent);\n} catch (e) {\n  throw new Error(`Invalid JSON from OpenRouter: ${e.message}`);\n}\n\n// Validation champs obligatoires\nconst required = ['script', 'shot_list', 'prompt_comfyui', 'prompt_fal', 'negative_prompt'];\nfor (const field of required) {\n  if (!parsed[field]) throw new Error(`Missing field: ${field}`);\n}\n\nif (!parsed.script.hook || !parsed.script.body || !parsed.script.cta) {\n  throw new Error('Missing script.hook, script.body or script.cta');\n}\n\nif (!Array.isArray(parsed.shot_list) || parsed.shot_list.length < 3 || parsed.shot_list.length > 5) {\n  throw new Error(`shot_list must have 3-5 scenes, got ${parsed.shot_list?.length}`);\n}\n\n// Coût approximatif (OpenRouter retourne en USD)\nconst cost_usd = (usage.prompt_tokens * 0.000003) + (usage.completion_tokens * 0.000015);\n\nreturn [{\n  json: {\n    video_id,\n    client_id,\n    script_data:        parsed,\n    prompt_tokens:      usage.prompt_tokens || 0,\n    completion_tokens:  usage.completion_tokens || 0,\n    cost_usd,\n    model_used:         response.model || 'unknown'\n  }\n}];"
+      },
+      "id": "80818283-8485-8687-8889-8a8b8c8d8e8f",
+      "name": "Validate Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1620, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/update_video_statut",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({\n  p_video_id: $json.video_id,\n  p_statut: 'script_generated',\n  p_payload: {\n    script_json:     JSON.stringify($json.script_data.script),\n    shot_list:       JSON.stringify($json.script_data.shot_list),\n    prompt_comfyui:  $json.script_data.prompt_comfyui,\n    prompt_fal:      $json.script_data.prompt_fal,\n    negative_prompt: $json.script_data.negative_prompt\n  }\n}) }}"
+      },
+      "id": "90919293-9495-9697-9899-9a9b9c9d9e9f",
+      "name": "Save Script to Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1860, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/log_script_generation",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({\n  p_video_id:          $json.video_id,\n  p_model:             $json.model_used,\n  p_prompt_tokens:     $json.prompt_tokens,\n  p_completion_tokens: $json.completion_tokens,\n  p_cost_usd:          $json.cost_usd,\n  p_success:           true\n}) }}"
+      },
+      "id": "a0a1a2a3-a4a5-a6a7-a8a9-aaabacadaeaf",
+      "name": "Log Cost",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1860, 420]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/pages/{{ $node['Get Video Details'].json[0].notion_page_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization",  "value": "=Bearer {{ $env.NOTION_API_KEY }}" },
+            { "name": "Notion-Version", "value": "2022-06-28" },
+            { "name": "Content-Type",   "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({\n  properties: {\n    'Statut': { select: { name: 'Script généré' } },\n    'Script': {\n      rich_text: [{\n        type: 'text',\n        text: { content: JSON.stringify($node['Validate Script'].json.script_data.script, null, 2).substring(0, 2000) }\n      }]\n    }\n  }\n}) }}"
+      },
+      "id": "b0b1b2b3-b4b5-b6b7-b8b9-babbbcbdbebf",
+      "name": "Update Notion Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2100, 300]
+    }
+  ],
+  "connections": {
+    "Script Agent Webhook": {
+      "main": [[{ "node": "Get Video Details", "type": "main", "index": 0 }]]
+    },
+    "Get Video Details": {
+      "main": [[{ "node": "Set Generating", "type": "main", "index": 0 }]]
+    },
+    "Set Generating": {
+      "main": [
+        [{ "node": "Get RAG Context",     "type": "main", "index": 0 }],
+        [{ "node": "Get Winning Patterns", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get RAG Context": {
+      "main": [[{ "node": "Build Prompt", "type": "main", "index": 0 }]]
+    },
+    "Get Winning Patterns": {
+      "main": [[{ "node": "Build Prompt", "type": "main", "index": 0 }]]
+    },
+    "Build Prompt": {
+      "main": [[{ "node": "Call OpenRouter", "type": "main", "index": 0 }]]
+    },
+    "Call OpenRouter": {
+      "main": [[{ "node": "Validate Script", "type": "main", "index": 0 }]]
+    },
+    "Validate Script": {
+      "main": [
+        [{ "node": "Save Script to Supabase", "type": "main", "index": 0 }],
+        [{ "node": "Log Cost",               "type": "main", "index": 0 }]
+      ]
+    },
+    "Save Script to Supabase": {
+      "main": [[{ "node": "Update Notion Page", "type": "main", "index": 0 }]]
+    },
+    "Log Cost": {
+      "main": [[{ "node": "Update Notion Page", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": ""
+  },
+  "meta": {
+    "instanceId": "mos-pipeline"
+  },
+  "tags": [{ "name": "MOS-v4.1" }],
+  "__mos_config": {
+    "env_required": [
+      "SUPABASE_URL",
+      "SUPABASE_SERVICE_KEY",
+      "NOTION_API_KEY",
+      "OPENROUTER_API_KEY",
+      "OPENROUTER_MODEL",
+      "VIDEO_SCRIPT_SYSTEM_PROMPT",
+      "N8N_BASE_URL",
+      "MOS_WEBHOOK_SECRET"
+    ],
+    "note": "VIDEO_SCRIPT_SYSTEM_PROMPT = contenu de prompts/video-script-agent.md (section system prompt)"
+  }
+}
