@@ -1,0 +1,227 @@
+{
+  "name": "MOS-v4.1-Fal-Submit",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "mos-fal-video",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "f001aa11-bb22-cc33-dd44-ee5566778899",
+      "name": "Fal Submit Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [180, 300],
+      "webhookId": "mos-fal-submit"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/video_production_notion?id=eq.{{ $json.video_id }}&select=id,client_id,notion_page_id,reference_image_url,prompt_fal,negative_prompt,platform,format,statut",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        }
+      },
+      "id": "f002bb22-cc33-dd44-ee55-ff6677889900",
+      "name": "Get Video Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "has-image",
+              "leftValue": "={{ $json[0].reference_image_url }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            }
+          ]
+        }
+      },
+      "id": "f003cc33-dd44-ee55-ff66-778899001122",
+      "name": "Has Reference Image?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/queue_fal_video",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_video_id: $json[0].id, p_model: $env.FAL_VIDEO_MODEL || 'fal-ai/kling-video/v1.6/standard/image-to-video', p_payload: { triggered_by: 'notion_sync', execution_id: $execution.id } }) }}"
+      },
+      "id": "f004dd44-ee55-ff66-7788-990011223344",
+      "name": "Create Fal Queue Entry",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 180]
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Build fal.ai model-specific payload\nconst video     = $node['Get Video Details'].json[0];\nconst queueId   = $node['Create Fal Queue Entry'].json;\nconst falModel  = $env.FAL_VIDEO_MODEL || 'fal-ai/kling-video/v1.6/standard/image-to-video';\nconst webhookUrl = `${$env.N8N_BASE_URL}/webhook/mos-fal-callback`;\n\n// Détermine durée et ratio depuis la vidéo\nconst isReels = (video.platform || '').toLowerCase().includes('instagram');\nconst isTikTok = (video.platform || '').toLowerCase().includes('tiktok');\nconst aspect = (isReels || isTikTok) ? '9:16' : '16:9';\nconst duration = '5'; // secondes\n\nlet payload = {};\n\nif (falModel.includes('kling')) {\n  payload = {\n    image_url:    video.reference_image_url,\n    prompt:       video.prompt_fal || 'smooth cinematic camera movement, professional quality',\n    duration,\n    aspect_ratio: aspect\n  };\n} else if (falModel.includes('minimax')) {\n  payload = {\n    first_frame_image: video.reference_image_url,\n    prompt: video.prompt_fal || 'smooth cinematic movement',\n    duration: parseInt(duration)\n  };\n} else if (falModel.includes('luma')) {\n  payload = {\n    keyframes: {\n      frame0: { type: 'image', url: video.reference_image_url }\n    },\n    prompt: video.prompt_fal,\n    aspect_ratio: aspect,\n    loop: false\n  };\n} else {\n  // Fallback générique\n  payload = {\n    image_url: video.reference_image_url,\n    prompt: video.prompt_fal\n  };\n}\n\nreturn [{\n  json: {\n    queue_id:      queueId,\n    video_id:      video.id,\n    client_id:     video.client_id,\n    notion_page_id: video.notion_page_id,\n    fal_model:     falModel,\n    webhook_url:   webhookUrl,\n    payload\n  }\n}];"
+      },
+      "id": "f005ee55-ff66-7788-9900-112233445566",
+      "name": "Build Fal Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1140, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://queue.fal.run/{{ $json.fal_model }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization",       "value": "=Key {{ $env.FAL_API_KEY }}" },
+            { "name": "Content-Type",        "value": "application/json" },
+            { "name": "x-fal-webhook-url",   "value": "={{ $json.webhook_url }}" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}"
+      },
+      "id": "f006ff66-7788-9900-1122-334455667788",
+      "name": "Submit to fal.ai",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1380, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/mark_fal_started",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_queue_id: $node['Build Fal Payload'].json.queue_id, p_request_id: $json.request_id }) }}"
+      },
+      "id": "f007aa77-bb88-cc99-dd00-ee1122334455",
+      "name": "Save Request ID",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1620, 180]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'accepted', queue_id: $node['Build Fal Payload'].json.queue_id, fal_request_id: $node['Submit to fal.ai'].json.request_id, fal_status: $node['Submit to fal.ai'].json.status }) }}",
+        "options": { "responseCode": 202 }
+      },
+      "id": "f008bb88-cc99-dd00-ee11-2233445566778",
+      "name": "Respond 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1860, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/create_pipeline_alert",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_client_id: $node['Get Video Details'].json[0].client_id, p_video_id: $node['Get Video Details'].json[0].id, p_source: 'fal', p_severity: 'warning', p_alert_type: 'missing_reference_image', p_message: 'Video reached image_approved status but reference_image_url is empty — fal.ai submit blocked', p_payload: { video_id: $node['Get Video Details'].json[0].id } }) }}"
+      },
+      "id": "f009cc99-dd00-ee11-2233-4455667788990",
+      "name": "Alert Missing Image",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 420]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"blocked\", \"reason\": \"reference_image_url is empty — run ComfyUI first\" }",
+        "options": { "responseCode": 400 }
+      },
+      "id": "f010dd00-ee11-2233-4455-667788990011",
+      "name": "Respond 400 No Image",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1140, 420]
+    }
+  ],
+  "connections": {
+    "Fal Submit Webhook": {
+      "main": [[{ "node": "Get Video Details", "type": "main", "index": 0 }]]
+    },
+    "Get Video Details": {
+      "main": [[{ "node": "Has Reference Image?", "type": "main", "index": 0 }]]
+    },
+    "Has Reference Image?": {
+      "main": [
+        [{ "node": "Create Fal Queue Entry", "type": "main", "index": 0 }],
+        [{ "node": "Alert Missing Image",    "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Fal Queue Entry": {
+      "main": [[{ "node": "Build Fal Payload", "type": "main", "index": 0 }]]
+    },
+    "Build Fal Payload": {
+      "main": [[{ "node": "Submit to fal.ai", "type": "main", "index": 0 }]]
+    },
+    "Submit to fal.ai": {
+      "main": [[{ "node": "Save Request ID", "type": "main", "index": 0 }]]
+    },
+    "Save Request ID": {
+      "main": [[{ "node": "Respond 202 Accepted", "type": "main", "index": 0 }]]
+    },
+    "Alert Missing Image": {
+      "main": [[{ "node": "Respond 400 No Image", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "instanceId": "mos-pipeline" },
+  "tags": [{ "name": "MOS-v4.1" }],
+  "__mos_config": {
+    "env_required": [
+      "SUPABASE_URL", "SUPABASE_SERVICE_KEY",
+      "FAL_API_KEY",
+      "FAL_VIDEO_MODEL",
+      "N8N_BASE_URL"
+    ],
+    "fal_models_supported": [
+      "fal-ai/kling-video/v1.6/standard/image-to-video",
+      "fal-ai/kling-video/v1.6/pro/image-to-video",
+      "fal-ai/minimax-video/image-to-video",
+      "fal-ai/luma-dream-machine/image-to-video"
+    ],
+    "webhook_registered_at": "x-fal-webhook-url header",
+    "webhook_receives_at": "N8N_BASE_URL/webhook/mos-fal-callback"
+  }
+}
