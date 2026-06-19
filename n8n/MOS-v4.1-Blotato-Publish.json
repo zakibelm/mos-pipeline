@@ -1,0 +1,441 @@
+{
+  "name": "MOS-v4.1-Blotato-Publish",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "mos-blotato",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b001aa11-bb22-cc33-dd44-ee5566778899",
+      "name": "Blotato Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [180, 300],
+      "webhookId": "mos-blotato-publish"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/get_blotato_publish_context",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_video_id: $json.video_id }) }}"
+      },
+      "id": "b002bb22-cc33-dd44-ee55-ff6677889900",
+      "name": "Get Publish Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Valide que la vidéo est prête pour publication\nconst ctx = $input.first().json[0];\n\nif (!ctx) throw new Error(`Video not found: ${$node['Blotato Webhook'].json.video_id}`);\n\nif (!ctx.video_url) {\n  throw new Error(`video_url is empty for video ${ctx.video_id} — run fal.ai sprint first`);\n}\n\nif (ctx.statut === 'published') {\n  throw new Error(`Video ${ctx.video_id} already published (post_id: ${ctx.blotato_post_id}) — skipping`);\n}\n\nif (ctx.statut === 'scheduled' && ctx.blotato_post_id) {\n  throw new Error(`Video ${ctx.video_id} already scheduled (post_id: ${ctx.blotato_post_id}) — skipping`);\n}\n\n// Construit la caption finale\nconst caption = ctx.script_caption\n  || [ctx.script_hook, ctx.script_cta].filter(Boolean).join('\\n\\n')\n  || ctx.title\n  || 'Nouveau contenu';\n\n// Mapping plateformes MOS → Blotato\nconst platformRaw = (ctx.platform || 'instagram').toLowerCase();\nconst platformMap = {\n  'instagram':        'instagram_reels',\n  'instagram_reels':  'instagram_reels',\n  'instagram reels':  'instagram_reels',\n  'tiktok':           'tiktok',\n  'youtube':          'youtube_shorts',\n  'youtube_shorts':   'youtube_shorts',\n  'youtube shorts':   'youtube_shorts',\n  'facebook':         'facebook_reels',\n  'facebook reels':   'facebook_reels',\n  'linkedin':         'linkedin',\n  'twitter':          'twitter',\n  'x':                'twitter'\n};\n\n// Supporte multi-plateforme (séparé par virgule)\nconst platforms = platformRaw\n  .split(',')\n  .map(p => platformMap[p.trim()] || 'instagram_reels')\n  .filter((v, i, a) => a.indexOf(v) === i); // unique\n\n// Détermine si publication immédiate ou planifiée\nconst scheduledAt = ctx.scheduled_at ? new Date(ctx.scheduled_at) : null;\nconst isFuture    = scheduledAt && scheduledAt > new Date();\n\nreturn [{\n  json: {\n    video_id:          ctx.video_id,\n    client_id:         ctx.client_id,\n    notion_page_id:    ctx.notion_page_id,\n    title:             ctx.title,\n    video_url:         ctx.video_url,\n    thumbnail_url:     ctx.thumbnail_url || null,\n    caption:           caption.substring(0, 2200), // Blotato cap\n    platforms,\n    is_future:         isFuture,\n    scheduled_at:      isFuture ? ctx.scheduled_at : null,\n    existing_media_id: ctx.existing_media_id || null\n  }\n}];"
+      },
+      "id": "b003cc33-dd44-ee55-ff66-778899001122",
+      "name": "Validate & Prepare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/acquire_processing_lock",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_client_id: $json.client_id, p_lock_type: 'blotato_publish', p_locked_by: $execution.id, p_ttl_minutes: 10 }) }}"
+      },
+      "id": "b004dd44-ee55-ff66-7788-990011223344",
+      "name": "Acquire Publish Lock",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "media-exists",
+              "leftValue": "={{ $node['Validate & Prepare'].json.existing_media_id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            }
+          ]
+        }
+      },
+      "id": "b005ee55-ff66-7788-9900-112233445566",
+      "name": "Media Already Uploaded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1140, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BLOTATO_API_URL }}/media",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.BLOTATO_API_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ url: $node['Validate & Prepare'].json.video_url, type: 'video', thumbnail_url: $node['Validate & Prepare'].json.thumbnail_url }) }}"
+      },
+      "id": "b006ff66-7788-9900-1122-334455667788",
+      "name": "Upload Media to Blotato",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1380, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/log_blotato_action",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_video_id: $node['Validate & Prepare'].json.video_id, p_action: 'media_upload', p_blotato_media_id: $json.media_id || $json.id || null, p_platform: $node['Validate & Prepare'].json.platforms.join(','), p_request_payload: { url: $node['Validate & Prepare'].json.video_url }, p_response_payload: $json, p_success: !!($json.media_id || $json.id), p_http_status: 200 }) }}"
+      },
+      "id": "b007aa77-bb88-cc99-dd00-ee1122334455",
+      "name": "Log Media Upload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1620, 180]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "media-id-new",
+              "name": "resolved_media_id",
+              "value": "={{ $node['Upload Media to Blotato'].json.media_id || $node['Upload Media to Blotato'].json.id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b008bb88-cc99-dd00-ee11-2233445566778",
+      "name": "Set New Media ID",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1860, 180]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "media-id-existing",
+              "name": "resolved_media_id",
+              "value": "={{ $node['Validate & Prepare'].json.existing_media_id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b009cc99-dd00-ee11-2233-4455667788990",
+      "name": "Reuse Existing Media ID",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1380, 420]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "mergeByFields": { "values": [] },
+        "options": {}
+      },
+      "id": "b010dd00-ee11-2233-4455-667788990011",
+      "name": "Merge Media ID",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [2100, 300]
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Construit le payload post Blotato\nconst prep      = $node['Validate & Prepare'].json;\nconst mediaId   = $json.resolved_media_id;\n\nif (!mediaId) throw new Error('No media_id resolved — upload may have failed');\n\nconst payload = {\n  media_ids:    [mediaId],\n  caption:      prep.caption,\n  platforms:    prep.platforms,\n  // Planifié ou immédiat\n  ...(prep.scheduled_at ? { scheduled_at: prep.scheduled_at } : {})\n};\n\n// Coût estimé Blotato (configurable)\nconst costPerPost = parseFloat(process.env.BLOTATO_COST_PER_POST_CAD || '0.05');\n\nreturn [{\n  json: {\n    video_id:       prep.video_id,\n    client_id:      prep.client_id,\n    notion_page_id: prep.notion_page_id,\n    media_id:       mediaId,\n    platforms:      prep.platforms,\n    is_future:      prep.is_future,\n    scheduled_at:   prep.scheduled_at,\n    payload,\n    cost_cad:       costPerPost\n  }\n}];"
+      },
+      "id": "b011ee11-2233-4455-6677-889900112233",
+      "name": "Build Post Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2340, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BLOTATO_API_URL }}/posts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.BLOTATO_API_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}"
+      },
+      "id": "b012ff22-3344-5566-7788-990011223344",
+      "name": "Create or Schedule Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2580, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/log_blotato_action",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_video_id: $node['Build Post Payload'].json.video_id, p_action: $node['Build Post Payload'].json.is_future ? 'post_schedule' : 'post_publish', p_blotato_media_id: $node['Build Post Payload'].json.media_id, p_blotato_post_id: $json.post_id || $json.id || null, p_platform: $node['Build Post Payload'].json.platforms.join(','), p_request_payload: $node['Build Post Payload'].json.payload, p_response_payload: $json, p_success: !!($json.post_id || $json.id), p_cost_cad: $node['Build Post Payload'].json.cost_cad }) }}"
+      },
+      "id": "b013aa33-4455-6677-8899-001122334455",
+      "name": "Log Post Creation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2820, 300]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "output": "={{ $node['Build Post Payload'].json.is_future ? 0 : 1 }}",
+        "cases": [
+          { "value": 0, "output": 0 },
+          { "value": 1, "output": 1 }
+        ],
+        "fallbackOutput": 1
+      },
+      "id": "b014bb44-5566-7788-9900-112233445566",
+      "name": "Scheduled or Published?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [3060, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/mark_blotato_scheduled",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_video_id: $node['Build Post Payload'].json.video_id, p_post_id: $node['Create or Schedule Post'].json.post_id || $node['Create or Schedule Post'].json.id, p_scheduled_at: $node['Build Post Payload'].json.scheduled_at, p_cost_cad: $node['Build Post Payload'].json.cost_cad }) }}"
+      },
+      "id": "b015cc55-6677-8899-0011-223344556677",
+      "name": "Mark Scheduled",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3300, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/mark_blotato_published",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_video_id: $node['Build Post Payload'].json.video_id, p_post_id: $node['Create or Schedule Post'].json.post_id || $node['Create or Schedule Post'].json.id, p_cost_cad: $node['Build Post Payload'].json.cost_cad }) }}"
+      },
+      "id": "b016dd66-7788-9900-1122-334455667788",
+      "name": "Mark Published",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3300, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/release_processing_lock",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_client_id: $node['Build Post Payload'].json.client_id, p_lock_type: 'blotato_publish' }) }}"
+      },
+      "id": "b017ee77-8899-0011-2233-445566778899",
+      "name": "Release Publish Lock",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3540, 300]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/pages/{{ $node['Build Post Payload'].json.notion_page_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization",  "value": "=Bearer {{ $env.NOTION_API_KEY }}" },
+            { "name": "Notion-Version", "value": "2022-06-28" },
+            { "name": "Content-Type",   "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: { 'Statut': { select: { name: $node['Build Post Payload'].json.is_future ? 'Planifié' : 'Publié' } }, 'Blotato Post ID': { rich_text: [{ type: 'text', text: { content: $node['Create or Schedule Post'].json.post_id || $node['Create or Schedule Post'].json.id || '' } }] }, 'Date publication': $node['Build Post Payload'].json.scheduled_at ? { date: { start: $node['Build Post Payload'].json.scheduled_at } } : undefined } }) }}"
+      },
+      "id": "b018ff88-9900-1122-3344-556677889900",
+      "name": "Update Notion Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3780, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: $node['Build Post Payload'].json.is_future ? 'scheduled' : 'published', post_id: $node['Create or Schedule Post'].json.post_id || $node['Create or Schedule Post'].json.id, platforms: $node['Build Post Payload'].json.platforms, scheduled_at: $node['Build Post Payload'].json.scheduled_at || null }) }}",
+        "options": { "responseCode": 202 }
+      },
+      "id": "b019aa99-0011-2233-4455-667788990011",
+      "name": "Respond 202",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [4020, 300]
+    }
+  ],
+  "connections": {
+    "Blotato Webhook": {
+      "main": [[{ "node": "Get Publish Context", "type": "main", "index": 0 }]]
+    },
+    "Get Publish Context": {
+      "main": [[{ "node": "Validate & Prepare", "type": "main", "index": 0 }]]
+    },
+    "Validate & Prepare": {
+      "main": [[{ "node": "Acquire Publish Lock", "type": "main", "index": 0 }]]
+    },
+    "Acquire Publish Lock": {
+      "main": [[{ "node": "Media Already Uploaded?", "type": "main", "index": 0 }]]
+    },
+    "Media Already Uploaded?": {
+      "main": [
+        [{ "node": "Reuse Existing Media ID", "type": "main", "index": 0 }],
+        [{ "node": "Upload Media to Blotato", "type": "main", "index": 0 }]
+      ]
+    },
+    "Upload Media to Blotato": {
+      "main": [[{ "node": "Log Media Upload", "type": "main", "index": 0 }]]
+    },
+    "Log Media Upload": {
+      "main": [[{ "node": "Set New Media ID", "type": "main", "index": 0 }]]
+    },
+    "Set New Media ID": {
+      "main": [[{ "node": "Merge Media ID", "type": "main", "index": 0 }]]
+    },
+    "Reuse Existing Media ID": {
+      "main": [[{ "node": "Merge Media ID", "type": "main", "index": 0 }]]
+    },
+    "Merge Media ID": {
+      "main": [[{ "node": "Build Post Payload", "type": "main", "index": 0 }]]
+    },
+    "Build Post Payload": {
+      "main": [[{ "node": "Create or Schedule Post", "type": "main", "index": 0 }]]
+    },
+    "Create or Schedule Post": {
+      "main": [[{ "node": "Log Post Creation", "type": "main", "index": 0 }]]
+    },
+    "Log Post Creation": {
+      "main": [[{ "node": "Scheduled or Published?", "type": "main", "index": 0 }]]
+    },
+    "Scheduled or Published?": {
+      "main": [
+        [{ "node": "Mark Scheduled", "type": "main", "index": 0 }],
+        [{ "node": "Mark Published",  "type": "main", "index": 0 }]
+      ]
+    },
+    "Mark Scheduled": {
+      "main": [[{ "node": "Release Publish Lock", "type": "main", "index": 0 }]]
+    },
+    "Mark Published": {
+      "main": [[{ "node": "Release Publish Lock", "type": "main", "index": 0 }]]
+    },
+    "Release Publish Lock": {
+      "main": [[{ "node": "Update Notion Status", "type": "main", "index": 0 }]]
+    },
+    "Update Notion Status": {
+      "main": [[{ "node": "Respond 202", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "instanceId": "mos-pipeline" },
+  "tags": [{ "name": "MOS-v4.1" }],
+  "__mos_config": {
+    "env_required": [
+      "SUPABASE_URL", "SUPABASE_SERVICE_KEY",
+      "BLOTATO_API_URL", "BLOTATO_API_KEY",
+      "NOTION_API_KEY"
+    ],
+    "env_optional": {
+      "BLOTATO_COST_PER_POST_CAD": "0.05"
+    },
+    "blotato_api_url_example": "https://api.blotato.com/v1",
+    "rejeu_upload": "Si media_upload existe en DB pour ce video_id, le workflow réutilise le media_id sans réupload",
+    "platforms_supported": [
+      "instagram_reels", "tiktok", "youtube_shorts",
+      "facebook_reels", "linkedin", "twitter"
+    ],
+    "scheduling": "Si scheduled_at est dans le futur → Blotato planifie. Sinon → publication immédiate",
+    "idempotent_guard": "Validate & Prepare bloque si statut = published ou scheduled avec post_id existant"
+  }
+}
