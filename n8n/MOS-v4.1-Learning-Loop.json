@@ -1,0 +1,271 @@
+{
+  "name": "MOS-v4.1-Learning-Loop",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 24 }]
+        }
+      },
+      "id": "l001aa11-bb22-cc33-dd44-ee5566778899",
+      "name": "Daily KPI Cron",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [180, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/learning_loop_candidates?select=*&order=days_since_published.asc&limit=50",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        }
+      },
+      "id": "l002bb22-cc33-dd44-ee55-ff6677889900",
+      "name": "Get Learning Loop Candidates",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "has-candidates",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ]
+        }
+      },
+      "id": "l003cc33-dd44-ee55-ff66-778899001122",
+      "name": "Has Candidates?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "=",
+        "options": {}
+      },
+      "id": "l004dd44-ee55-ff66-7788-990011223344",
+      "name": "Split Into Videos",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [900, 180]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/blotato_publication_log?select=blotato_post_id,platform&video_id=eq.{{ $json.video_id }}&action=eq.post_create&success=eq.true&order=created_at.desc&limit=1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        }
+      },
+      "id": "l005ee55-ff66-7788-9900-112233445566",
+      "name": "Get Post Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 180]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.BLOTATO_API_URL || 'https://app.blotato.com' }}/api/v1/posts/{{ $node['Split Into Videos'].json.blotato_post_id }}/analytics",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.BLOTATO_API_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "response": { "response": { "neverError": true } }
+        }
+      },
+      "id": "l006ff66-7788-9900-1122-334455667788",
+      "name": "Fetch Platform Analytics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1380, 180]
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Normalise les métriques Blotato analytics vers le format ingest_video_kpis\n// Blotato analytics retourne des métriques agrégées multi-plateforme\nconst video    = $node['Split Into Videos'].json;\nconst analytics = $input.first().json;\n\n// Blotato retourne { data: { views, likes, comments, shares, saves, reach, impressions, avg_watch_time_seconds, avg_watch_percentage } }\nconst data = analytics.data || analytics || {};\n\n// Détecte un échec API Blotato (code 4xx/5xx ou champ error)\nconst hasError = analytics.error || analytics.status === 'error' || (!data.views && !data.reach);\n\nif (hasError) {\n  return [{\n    json: {\n      video_id: video.video_id,\n      client_id: video.client_id,\n      platform: video.platform,\n      error: analytics.error || 'no_analytics_data',\n      skip: true\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    video_id:             video.video_id,\n    client_id:            video.client_id,\n    platform:             video.platform || data.platform || 'unknown',\n    skip:                 false,\n    // Métriques normalisées\n    views:                data.views                || 0,\n    likes:                data.likes                || 0,\n    comments:             data.comments             || 0,\n    shares:               data.shares               || 0,\n    saves:                data.saves                || 0,\n    reach:                data.reach                || data.views || 0,\n    impressions:          data.impressions           || 0,\n    watch_time_seconds:   data.avg_watch_time_seconds || 0,\n    avg_watch_pct:        data.avg_watch_percentage  || null,\n    raw_payload:          analytics\n  }\n}];"
+      },
+      "id": "l007aa77-bb88-cc99-dd00-ee1122334455",
+      "name": "Normalize Analytics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1620, 180]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "not-skip",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "notEqual" }
+            }
+          ]
+        }
+      },
+      "id": "l008bb88-cc99-dd00-ee11-2233445566778",
+      "name": "Has Valid Metrics?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1860, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/ingest_video_kpis",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_video_id: $json.video_id, p_platform: $json.platform, p_views: $json.views, p_likes: $json.likes, p_comments: $json.comments, p_shares: $json.shares, p_saves: $json.saves, p_reach: $json.reach, p_impressions: $json.impressions, p_watch_time_seconds: $json.watch_time_seconds, p_avg_watch_pct: $json.avg_watch_pct, p_raw_payload: $json.raw_payload }) }}"
+      },
+      "id": "l009cc99-dd00-ee11-2233-4455667788990",
+      "name": "Ingest KPIs to Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2100, 60]
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Détermine si on log une alerte pour analytics manquants\nconst result = $input.first().json;\nconst hasMeaningfulData = result.memories_upserted > 0 || result.skipped_duplicate;\n\nreturn [{\n  json: {\n    video_id:           result.video_id,\n    kpi_id:             result.kpi_id,\n    engagement_rate:    result.engagement_rate,\n    memories_upserted:  result.memories_upserted,\n    skipped_duplicate:  result.skipped_duplicate,\n    needs_alert:        !hasMeaningfulData && result.engagement_rate === 0\n  }\n}];"
+      },
+      "id": "l010dd00-ee11-2233-4455-667788990011",
+      "name": "Check Ingest Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2340, 60]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "needs-alert",
+              "leftValue": "={{ $json.needs_alert }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equal" }
+            }
+          ]
+        }
+      },
+      "id": "l011ee11-2233-4455-6677-889900112233",
+      "name": "Needs Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2580, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/create_pipeline_alert",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_client_id: null, p_video_id: $json.video_id, p_source: 'system', p_severity: 'info', p_alert_type: 'zero_engagement_kpi', p_message: `Learning Loop: video ${$json.video_id} returned 0 engagement — analytics may not be available yet`, p_payload: { video_id: $json.video_id, engagement_rate: $json.engagement_rate } }) }}"
+      },
+      "id": "l012ff22-3344-5566-7788-990011223344",
+      "name": "Alert Zero Engagement",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2820, 0]
+    }
+  ],
+  "connections": {
+    "Daily KPI Cron": {
+      "main": [[{ "node": "Get Learning Loop Candidates", "type": "main", "index": 0 }]]
+    },
+    "Get Learning Loop Candidates": {
+      "main": [[{ "node": "Has Candidates?", "type": "main", "index": 0 }]]
+    },
+    "Has Candidates?": {
+      "main": [
+        [{ "node": "Split Into Videos", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Split Into Videos": {
+      "main": [[{ "node": "Get Post Details", "type": "main", "index": 0 }]]
+    },
+    "Get Post Details": {
+      "main": [[{ "node": "Fetch Platform Analytics", "type": "main", "index": 0 }]]
+    },
+    "Fetch Platform Analytics": {
+      "main": [[{ "node": "Normalize Analytics", "type": "main", "index": 0 }]]
+    },
+    "Normalize Analytics": {
+      "main": [[{ "node": "Has Valid Metrics?", "type": "main", "index": 0 }]]
+    },
+    "Has Valid Metrics?": {
+      "main": [
+        [{ "node": "Ingest KPIs to Supabase", "type": "main", "index": 0 }],
+        [{ "node": "Split Into Videos",        "type": "main", "index": 0 }]
+      ]
+    },
+    "Ingest KPIs to Supabase": {
+      "main": [[{ "node": "Check Ingest Result", "type": "main", "index": 0 }]]
+    },
+    "Check Ingest Result": {
+      "main": [[{ "node": "Needs Alert?", "type": "main", "index": 0 }]]
+    },
+    "Needs Alert?": {
+      "main": [
+        [{ "node": "Alert Zero Engagement", "type": "main", "index": 0 }],
+        [{ "node": "Split Into Videos",     "type": "main", "index": 0 }]
+      ]
+    },
+    "Alert Zero Engagement": {
+      "main": [[{ "node": "Split Into Videos", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "instanceId": "mos-pipeline" },
+  "tags": [{ "name": "MOS-v4.1" }],
+  "__mos_config": {
+    "env_required": [
+      "SUPABASE_URL", "SUPABASE_SERVICE_KEY",
+      "BLOTATO_API_KEY", "BLOTATO_API_URL"
+    ],
+    "cron": "every 24h",
+    "window": "published between 1 day and 90 days ago, not yet fetched today",
+    "idempotent": "video_kpi_log has UNIQUE INDEX on (video_id, platform, day) — duplicate runs same day are silently ignored",
+    "memory_update": "upsert_video_memory uses weighted average — safe to re-run, values converge rather than drift",
+    "flywheel": "memories feed get_client_winning_patterns → Script Agent prompt → better hooks/CTAs → higher engagement → stronger memories"
+  }
+}
