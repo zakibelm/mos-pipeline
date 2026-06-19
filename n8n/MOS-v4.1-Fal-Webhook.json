@@ -1,0 +1,230 @@
+{
+  "name": "MOS-v4.1-Fal-Webhook",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "mos-fal-callback",
+        "responseMode": "responseNode",
+        "options": { "rawBody": true }
+      },
+      "id": "w001aa11-bb22-cc33-dd44-ee5566778899",
+      "name": "Fal Callback Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [180, 300],
+      "webhookId": "mos-fal-callback"
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Parse fal.ai webhook payload\n// Format OK  : { request_id, status: 'OK',    payload: { video: { url, content_type, file_size } } }\n// Format ERR : { request_id, status: 'ERROR', error: { msg } }\nconst body = $input.first().json;\n\nconst requestId   = body.request_id;\nconst status      = body.status;           // 'OK' | 'ERROR'\nconst payload     = body.payload || {};\nconst error       = body.error || {};\n\nif (!requestId) {\n  throw new Error('fal.ai webhook missing request_id');\n}\n\nconst videoUrl    = payload.video?.url || null;\nconst contentType = payload.video?.content_type || 'video/mp4';\nconst fileSize    = payload.video?.file_size || 0;\nconst seed        = payload.seed || null;\nconst errorMsg    = error.msg || error.message || JSON.stringify(error) || 'fal.ai error';\n\n// Estimation coût (Kling Standard 5s ≈ 0.14 USD → 0.19 CAD)\nconst costCad = status === 'OK' ? 0.19 : 0;\n\nreturn [{\n  json: {\n    request_id:   requestId,\n    fal_status:   status,\n    video_url:    videoUrl,\n    content_type: contentType,\n    file_size:    fileSize,\n    seed,\n    error_msg:    status === 'ERROR' ? errorMsg : null,\n    cost_cad:     costCad\n  }\n}];"
+      },
+      "id": "w002bb22-cc33-dd44-ee55-ff6677889900",
+      "name": "Parse Fal Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/get_fal_queue_by_request_id",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_request_id: $json.request_id }) }}"
+      },
+      "id": "w003cc33-dd44-ee55-ff66-778899001122",
+      "name": "Lookup Queue by Request ID",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "found",
+              "leftValue": "={{ $json[0]?.queue_id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            }
+          ]
+        }
+      },
+      "id": "w004dd44-ee55-ff66-7788-990011223344",
+      "name": "Job Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "output": "={{ $node['Parse Fal Payload'].json.fal_status === 'OK' ? 0 : 1 }}",
+        "cases": [
+          { "value": 0, "output": 0 },
+          { "value": 1, "output": 1 }
+        ],
+        "fallbackOutput": 1
+      },
+      "id": "w005ee55-ff66-7788-9900-112233445566",
+      "name": "OK or Error?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [1140, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/mark_fal_completed",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_queue_id: $node['Lookup Queue by Request ID'].json[0].queue_id, p_video_url: $node['Parse Fal Payload'].json.video_url, p_output_payload: { content_type: $node['Parse Fal Payload'].json.content_type, file_size: $node['Parse Fal Payload'].json.file_size, seed: $node['Parse Fal Payload'].json.seed, cost_cad: $node['Parse Fal Payload'].json.cost_cad } }) }}"
+      },
+      "id": "w006ff66-7788-9900-1122-334455667788",
+      "name": "Mark Completed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1380, 60]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/pages/{{ $node['Lookup Queue by Request ID'].json[0].notion_page_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization",  "value": "=Bearer {{ $env.NOTION_API_KEY }}" },
+            { "name": "Notion-Version", "value": "2022-06-28" },
+            { "name": "Content-Type",   "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: { 'Statut': { select: { name: 'Vidéo générée' } }, 'Vidéo générée': { url: $node['Parse Fal Payload'].json.video_url } } }) }}"
+      },
+      "id": "w007aa77-bb88-cc99-dd00-ee1122334455",
+      "name": "Update Notion Video Generated",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1620, 60]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"processed\", \"action\": \"completed\" }",
+        "options": { "responseCode": 200 }
+      },
+      "id": "w008bb88-cc99-dd00-ee11-2233445566778",
+      "name": "Respond 200 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1860, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/mark_fal_failed",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_queue_id: $node['Lookup Queue by Request ID'].json[0].queue_id, p_error: $node['Parse Fal Payload'].json.error_msg }) }}"
+      },
+      "id": "w009cc99-dd00-ee11-2233-4455667788990",
+      "name": "Mark Failed (Retry or DL)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1380, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"processed\", \"action\": \"failed_or_retried\" }",
+        "options": { "responseCode": 200 }
+      },
+      "id": "w010dd00-ee11-2233-4455-667788990011",
+      "name": "Respond 200 Failed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1620, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"ignored\", \"reason\": \"request_id not found in queue\" }",
+        "options": { "responseCode": 200 }
+      },
+      "id": "w011ee11-2233-4455-6677-889900112233",
+      "name": "Respond 200 Not Found",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1140, 420]
+    }
+  ],
+  "connections": {
+    "Fal Callback Webhook": {
+      "main": [[{ "node": "Parse Fal Payload", "type": "main", "index": 0 }]]
+    },
+    "Parse Fal Payload": {
+      "main": [[{ "node": "Lookup Queue by Request ID", "type": "main", "index": 0 }]]
+    },
+    "Lookup Queue by Request ID": {
+      "main": [[{ "node": "Job Found?", "type": "main", "index": 0 }]]
+    },
+    "Job Found?": {
+      "main": [
+        [{ "node": "OK or Error?",        "type": "main", "index": 0 }],
+        [{ "node": "Respond 200 Not Found","type": "main", "index": 0 }]
+      ]
+    },
+    "OK or Error?": {
+      "main": [
+        [{ "node": "Mark Completed",          "type": "main", "index": 0 }],
+        [{ "node": "Mark Failed (Retry or DL)","type": "main", "index": 0 }]
+      ]
+    },
+    "Mark Completed": {
+      "main": [[{ "node": "Update Notion Video Generated", "type": "main", "index": 0 }]]
+    },
+    "Update Notion Video Generated": {
+      "main": [[{ "node": "Respond 200 OK", "type": "main", "index": 0 }]]
+    },
+    "Mark Failed (Retry or DL)": {
+      "main": [[{ "node": "Respond 200 Failed", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "instanceId": "mos-pipeline" },
+  "tags": [{ "name": "MOS-v4.1" }],
+  "__mos_config": {
+    "webhook_url": "{{ N8N_BASE_URL }}/webhook/mos-fal-callback",
+    "registered_via": "x-fal-webhook-url header in Submit workflow",
+    "note": "Toujours répondre 200 à fal.ai même si erreur — sinon fal.ai retente le webhook indéfiniment",
+    "idempotent": "mark_fal_completed ignore les doubles appels si fal_status = 'completed'"
+  }
+}
