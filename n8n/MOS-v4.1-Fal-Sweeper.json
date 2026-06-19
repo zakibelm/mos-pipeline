@@ -1,0 +1,269 @@
+{
+  "name": "MOS-v4.1-Fal-Sweeper",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 30 }]
+        }
+      },
+      "id": "s001aa11-bb22-cc33-dd44-ee5566778899",
+      "name": "Sweeper Cron 30min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [180, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/fal_jobs_active?select=*&order=created_at.asc&limit=50",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        }
+      },
+      "id": "s002bb22-cc33-dd44-ee55-ff6677889900",
+      "name": "Get Active Jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "has-jobs",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ]
+        }
+      },
+      "id": "s003cc33-dd44-ee55-ff66-778899001122",
+      "name": "Has Active Jobs?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "=",
+        "options": {}
+      },
+      "id": "s004dd44-ee55-ff66-7788-990011223344",
+      "name": "Split Into Jobs",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [900, 180]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://queue.fal.run/{{ $json.fal_model }}/requests/{{ $json.fal_request_id }}/status",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Key {{ $env.FAL_API_KEY }}" }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "response": { "response": { "neverError": true } }
+        }
+      },
+      "id": "s005ee55-ff66-7788-9900-112233445566",
+      "name": "Check Fal Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 180]
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Analyse statut fal.ai et détermine l'action\n// fal.ai status values: IN_QUEUE | IN_PROGRESS | COMPLETED | FAILED\nconst job        = $node['Split Into Jobs'].json;\nconst statusResp = $input.first().json;\n\nconst falStatus  = statusResp.status;   // IN_QUEUE | IN_PROGRESS | COMPLETED | FAILED\nconst ageStatus  = job.age_status;       // 'ok' | 'warning' | 'critical'\n\nlet action = 'skip';\n\nif (falStatus === 'COMPLETED') {\n  action = 'fetch_result';\n} else if (falStatus === 'FAILED') {\n  action = 'mark_failed';\n} else if (ageStatus === 'critical') {\n  // Toujours en queue/processing après 2h → dead letter\n  action = 'mark_stuck_dead_letter';\n} else {\n  // Encore en cours + pas critique → attendre prochain cycle\n  action = 'skip';\n}\n\nreturn [{\n  json: {\n    queue_id:      job.queue_id,\n    video_id:      job.video_id,\n    client_id:     job.client_id,\n    fal_model:     job.fal_model,\n    fal_request_id: job.fal_request_id,\n    notion_page_id: job.notion_page_id,\n    fal_status:    falStatus,\n    age_status:    ageStatus,\n    action\n  }\n}];"
+      },
+      "id": "s006ff66-7788-9900-1122-334455667788",
+      "name": "Decide Action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1380, 180]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "output": "={{ $json.action === 'fetch_result' ? 0 : ($json.action === 'mark_failed' || $json.action === 'mark_stuck_dead_letter' ? 1 : 2) }}",
+        "cases": [
+          { "value": 0, "output": 0 },
+          { "value": 1, "output": 1 },
+          { "value": 2, "output": 2 }
+        ],
+        "fallbackOutput": 2
+      },
+      "id": "s007aa77-bb88-cc99-dd00-ee1122334455",
+      "name": "Route Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [1620, 180]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://queue.fal.run/{{ $json.fal_model }}/requests/{{ $json.fal_request_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Key {{ $env.FAL_API_KEY }}" }
+          ]
+        }
+      },
+      "id": "s008bb88-cc99-dd00-ee11-2233445566778",
+      "name": "Fetch Fal Result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1860, 60]
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Extrait video_url du résultat fal.ai (format varie selon modèle)\nconst result = $input.first().json;\nconst job    = $node['Decide Action'].json;\n\n// Kling / Minimax / Luma : tous retournent un champ 'video'\nconst videoData = result.video || result.output?.video || result.videos?.[0] || {};\nconst videoUrl  = videoData.url || videoData.video_url || null;\n\nif (!videoUrl) {\n  throw new Error(`No video URL in fal.ai result for request ${job.fal_request_id}: ${JSON.stringify(result).substring(0, 200)}`);\n}\n\nconst costCad = 0.19; // Kling Standard 5s estimé\n\nreturn [{\n  json: {\n    queue_id:      job.queue_id,\n    video_id:      job.video_id,\n    client_id:     job.client_id,\n    notion_page_id: job.notion_page_id,\n    video_url:     videoUrl,\n    file_size:     videoData.file_size || 0,\n    content_type:  videoData.content_type || 'video/mp4',\n    cost_cad:      costCad\n  }\n}];"
+      },
+      "id": "s009cc99-dd00-ee11-2233-4455667788990",
+      "name": "Extract Video URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2100, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/mark_fal_completed",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_queue_id: $json.queue_id, p_video_url: $json.video_url, p_output_payload: { file_size: $json.file_size, content_type: $json.content_type, cost_cad: $json.cost_cad, source: 'sweeper' } }) }}"
+      },
+      "id": "s010dd00-ee11-2233-4455-667788990011",
+      "name": "Mark Completed (Sweeper)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2340, 60]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/pages/{{ $json.notion_page_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization",  "value": "=Bearer {{ $env.NOTION_API_KEY }}" },
+            { "name": "Notion-Version", "value": "2022-06-28" },
+            { "name": "Content-Type",   "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: { 'Statut': { select: { name: 'Vidéo générée' } }, 'Vidéo générée': { url: $node['Extract Video URL'].json.video_url } } }) }}"
+      },
+      "id": "s011ee11-2233-4455-6677-889900112233",
+      "name": "Update Notion (Sweeper)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2580, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/mark_fal_failed",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ p_queue_id: $json.queue_id, p_error: $json.action === 'mark_stuck_dead_letter' ? `Job stuck >2h in status ${$json.fal_status} — sweeper escalated to dead_letter` : `fal.ai returned FAILED status for request ${$json.fal_request_id}` }) }}"
+      },
+      "id": "s012ff22-3344-5566-7788-990011223344",
+      "name": "Mark Failed (Sweeper)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1860, 300]
+    }
+  ],
+  "connections": {
+    "Sweeper Cron 30min": {
+      "main": [[{ "node": "Get Active Jobs", "type": "main", "index": 0 }]]
+    },
+    "Get Active Jobs": {
+      "main": [[{ "node": "Has Active Jobs?", "type": "main", "index": 0 }]]
+    },
+    "Has Active Jobs?": {
+      "main": [
+        [{ "node": "Split Into Jobs", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Split Into Jobs": {
+      "main": [[{ "node": "Check Fal Status", "type": "main", "index": 0 }]]
+    },
+    "Check Fal Status": {
+      "main": [[{ "node": "Decide Action", "type": "main", "index": 0 }]]
+    },
+    "Decide Action": {
+      "main": [[{ "node": "Route Action", "type": "main", "index": 0 }]]
+    },
+    "Route Action": {
+      "main": [
+        [{ "node": "Fetch Fal Result",   "type": "main", "index": 0 }],
+        [{ "node": "Mark Failed (Sweeper)","type": "main", "index": 0 }],
+        [{ "node": "Split Into Jobs",     "type": "main", "index": 0 }]
+      ]
+    },
+    "Fetch Fal Result": {
+      "main": [[{ "node": "Extract Video URL", "type": "main", "index": 0 }]]
+    },
+    "Extract Video URL": {
+      "main": [[{ "node": "Mark Completed (Sweeper)", "type": "main", "index": 0 }]]
+    },
+    "Mark Completed (Sweeper)": {
+      "main": [[{ "node": "Update Notion (Sweeper)", "type": "main", "index": 0 }]]
+    },
+    "Update Notion (Sweeper)": {
+      "main": [[{ "node": "Split Into Jobs", "type": "main", "index": 0 }]]
+    },
+    "Mark Failed (Sweeper)": {
+      "main": [[{ "node": "Split Into Jobs", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "instanceId": "mos-pipeline" },
+  "tags": [{ "name": "MOS-v4.1" }],
+  "__mos_config": {
+    "env_required": [
+      "SUPABASE_URL", "SUPABASE_SERVICE_KEY",
+      "FAL_API_KEY", "NOTION_API_KEY"
+    ],
+    "age_thresholds": {
+      "warning":  "30 minutes — webhook probablement manqué",
+      "critical": "2 heures — dead_letter + alerte humaine"
+    },
+    "idempotent": "mark_fal_completed ignore si fal_status déjà completed — safe si webhook ET sweeper arrivent sur le même job",
+    "status_url_pattern": "https://queue.fal.run/{fal_model}/requests/{fal_request_id}/status"
+  }
+}
