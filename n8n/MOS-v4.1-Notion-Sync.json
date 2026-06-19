@@ -1,0 +1,322 @@
+{
+  "name": "MOS-v4.1-Notion-Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "notion-sync",
+        "responseMode": "onReceived",
+        "options": { "rawBody": true }
+      },
+      "id": "aa11bb22-cc33-dd44-ee55-ff6677889900",
+      "name": "Notion Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [180, 300],
+      "webhookId": "mos-notion-sync"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 10 }]
+        }
+      },
+      "id": "bb22cc33-dd44-ee55-ff66-778899001122",
+      "name": "Backup Cron 10min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [180, 500]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "src",
+              "name": "trigger_source",
+              "value": "webhook",
+              "type": "string"
+            },
+            {
+              "id": "pid",
+              "name": "notion_page_id",
+              "value": "={{ $json.entity?.id ?? $json.page?.id ?? '' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cc33dd44-ee55-ff66-7788-990011223344",
+      "name": "Extract Page ID",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "src-cron",
+              "name": "trigger_source",
+              "value": "cron",
+              "type": "string"
+            },
+            {
+              "id": "pid-cron",
+              "name": "notion_page_id",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cc33dd44-ee55-ff66-7788-990011223355",
+      "name": "Set Cron Source",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [420, 500]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/notion_sync_events",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",         "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization",  "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",   "value": "application/json" },
+            { "name": "Prefer",         "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ notion_page_id: $json.notion_page_id, raw_payload: $input.first().json }) }}"
+      },
+      "id": "dd44ee55-ff66-7788-9900-112233445566",
+      "name": "Save Raw Event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.notion.com/v1/pages/{{ $json.notion_page_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization",  "value": "=Bearer {{ $env.NOTION_API_KEY }}" },
+            { "name": "Notion-Version", "value": "2022-06-28" }
+          ]
+        }
+      },
+      "id": "ee55ff66-7788-9900-1122-334455667788",
+      "name": "Get Notion Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "mode": "code",
+        "jsCode": "// Map Notion page properties → video_production_notion schema\nconst page = $input.first().json;\nconst p = page.properties || {};\n\nconst title      = (f) => f?.title?.[0]?.plain_text || f?.rich_text?.[0]?.plain_text || '';\nconst rich       = (f) => (f?.rich_text || []).map(r => r.plain_text).join('') || null;\nconst select     = (f) => f?.select?.name || null;\nconst multisel   = (f) => (f?.multi_select || []).map(s => s.name).join(',') || null;\nconst dateField  = (f) => f?.date?.start || null;\n\nconst statutMap = {\n  'Brief créé':           'brief_created',\n  'Brief synchronisé':    'brief_synced',\n  'Script en génération': 'script_generating',\n  'Script généré':        'script_generated',\n  'Script approuvé':      'script_approved',\n  'Image en file':        'image_queued',\n  'Image en génération':  'image_processing',\n  'Image générée':        'image_generated',\n  'Image approuvée':      'image_approved',\n  'Vidéo en file':        'video_queued',\n  'Vidéo en génération':  'video_processing',\n  'Vidéo générée':        'video_generated',\n  'Review client':        'client_review',\n  'Approuvé publication': 'approved_for_publish',\n  'Planifié':             'scheduled',\n  'Publié':               'published',\n  'Erreur retry':         'failed_retryable',\n  'Dead letter':          'dead_letter',\n  'Archivé':              'archived'\n};\n\nconst notionStatut = select(p['Statut']);\n\nreturn [{\n  json: {\n    notion_page_id:     page.id,\n    notion_database_id: page.parent?.database_id || null,\n    notion_url:         page.url,\n    title:              title(p['Titre']) || 'Sans titre',\n    brief:              rich(p['Brief']),\n    objective:          select(p['Objectif']),\n    target_audience:    rich(p['Audience']),\n    platform:           multisel(p['Plateforme']),\n    format:             select(p['Format']),\n    language:           select(p['Langue']) || 'fr-CA',\n    statut:             statutMap[notionStatut] || 'brief_created',\n    blotato_post_id:    rich(p['Blotato Post ID']),\n    scheduled_at:       dateField(p['Date publication']),\n    client_id:          rich(p['Client ID'])\n  }\n}];"
+      },
+      "id": "ff667788-9900-1122-3344-556677889900",
+      "name": "Map Notion to Supabase",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1140, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/video_production_notion",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Prefer",        "value": "return=representation,resolution=merge-duplicates" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "on_conflict", "value": "notion_page_id" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "aa223344-bb55-cc66-dd77-ee8899001122",
+      "name": "Upsert Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1380, 300]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "output": "={{ $json[0]?.statut }}",
+        "cases": [
+          { "value": "brief_created",      "output": 0 },
+          { "value": "brief_synced",        "output": 0 },
+          { "value": "script_approved",     "output": 1 },
+          { "value": "image_approved",      "output": 2 },
+          { "value": "approved_for_publish","output": 3 }
+        ],
+        "fallbackOutput": 4
+      },
+      "id": "bb334455-cc66-dd77-ee88-ff9900112233",
+      "name": "Route by Statut",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [1620, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_BASE_URL }}/webhook/mos-script-agent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "x-mos-token", "value": "={{ $env.MOS_WEBHOOK_SECRET }}" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ video_id: $json[0]?.id, notion_page_id: $json[0]?.notion_page_id }) }}"
+      },
+      "id": "cc445566-dd77-ee88-ff99-001122334455",
+      "name": "Trigger Script Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1860, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_BASE_URL }}/webhook/mos-comfyui",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "x-mos-token", "value": "={{ $env.MOS_WEBHOOK_SECRET }}" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ video_id: $json[0]?.id }) }}"
+      },
+      "id": "dd556677-ee88-ff99-0011-223344556677",
+      "name": "Trigger ComfyUI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1860, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_BASE_URL }}/webhook/mos-fal-video",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "x-mos-token", "value": "={{ $env.MOS_WEBHOOK_SECRET }}" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ video_id: $json[0]?.id }) }}"
+      },
+      "id": "ee667788-ff99-0011-2233-445566778899",
+      "name": "Trigger Fal Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1860, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_BASE_URL }}/webhook/mos-blotato",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "x-mos-token", "value": "={{ $env.MOS_WEBHOOK_SECRET }}" }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ JSON.stringify({ video_id: $json[0]?.id }) }}"
+      },
+      "id": "ff778899-0011-2233-4455-667788990011",
+      "name": "Trigger Blotato",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1860, 540]
+    }
+  ],
+  "connections": {
+    "Notion Webhook": {
+      "main": [[{ "node": "Extract Page ID", "type": "main", "index": 0 }]]
+    },
+    "Backup Cron 10min": {
+      "main": [[{ "node": "Set Cron Source", "type": "main", "index": 0 }]]
+    },
+    "Extract Page ID": {
+      "main": [[{ "node": "Save Raw Event", "type": "main", "index": 0 }]]
+    },
+    "Set Cron Source": {
+      "main": [[{ "node": "Save Raw Event", "type": "main", "index": 0 }]]
+    },
+    "Save Raw Event": {
+      "main": [[{ "node": "Get Notion Page", "type": "main", "index": 0 }]]
+    },
+    "Get Notion Page": {
+      "main": [[{ "node": "Map Notion to Supabase", "type": "main", "index": 0 }]]
+    },
+    "Map Notion to Supabase": {
+      "main": [[{ "node": "Upsert Supabase", "type": "main", "index": 0 }]]
+    },
+    "Upsert Supabase": {
+      "main": [[{ "node": "Route by Statut", "type": "main", "index": 0 }]]
+    },
+    "Route by Statut": {
+      "main": [
+        [{ "node": "Trigger Script Agent", "type": "main", "index": 0 }],
+        [{ "node": "Trigger ComfyUI",      "type": "main", "index": 0 }],
+        [{ "node": "Trigger Fal Video",    "type": "main", "index": 0 }],
+        [{ "node": "Trigger Blotato",      "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "mos-pipeline"
+  },
+  "tags": [{ "name": "MOS-v4.1" }],
+  "__mos_config": {
+    "env_required": [
+      "SUPABASE_URL",
+      "SUPABASE_SERVICE_KEY",
+      "NOTION_API_KEY",
+      "N8N_BASE_URL",
+      "MOS_WEBHOOK_SECRET"
+    ],
+    "webhook_url": "{{ N8N_BASE_URL }}/webhook/notion-sync",
+    "notion_setup": "Configure ce webhook URL dans Settings → Notion Integrations → Webhooks"
+  }
+}
