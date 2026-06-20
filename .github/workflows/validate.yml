@@ -1,0 +1,49 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-json:
+    name: Validate JSON Files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Validate n8n JSON workflows
+        run: |
+          for f in n8n/*.json; do
+            echo "Checking $f..."
+            jq empty "$f" && echo "  OK: $f" || { echo "  FAIL: $f"; exit 1; }
+          done
+
+      - name: Validate ComfyUI JSON workflows
+        run: |
+          for f in comfyui/*.json; do
+            echo "Checking $f..."
+            jq empty "$f" && echo "  OK: $f" || { echo "  FAIL: $f"; exit 1; }
+          done
+
+      - name: All JSON valid
+        run: echo "All JSON files passed validation"
+
+  scan-secrets:
+    name: Scan for Secrets (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
