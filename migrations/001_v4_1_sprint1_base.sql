@@ -299,7 +299,7 @@ RETURNS BOOLEAN
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  v_acquired BOOLEAN := FALSE;
+  v_rows INT;
 BEGIN
   -- Purge des locks expirés avant tentative d'acquisition
   DELETE FROM processing_locks WHERE expires_at < NOW();
@@ -313,8 +313,8 @@ BEGIN
   )
   ON CONFLICT (client_id, lock_type) DO NOTHING;
 
-  GET DIAGNOSTICS v_acquired = ROW_COUNT;
-  RETURN v_acquired;
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows > 0;
 END;
 $$;
 
